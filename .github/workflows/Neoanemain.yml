@@ -1,0 +1,63 @@
+name: FPS Boost + RunnerAdmin Setup
+
+on:
+  workflow_dispatch:
+
+env:
+  TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+  KEEPALIVE_ITER: 432
+  RUNNERADMIN_USER: runneradmin
+  RUNNERADMIN_PASS: >-
+    *yB)9TnGro(3\"j?
+
+jobs:
+  boost-rdp:
+    runs-on: windows-2022
+    timeout-minutes: 4320
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure runneradmin user
+        shell: pwsh
+        run: |
+          $user = $env:RUNNERADMIN_USER
+          $pass = $env:RUNNERADMIN_PASS
+          $secure = ConvertTo-SecureString $pass -AsPlainText -Force
+          $existing = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
+          if ($existing) {
+            try { Set-LocalUser -Name $user -Password $secure } catch {}
+          } else {
+            New-LocalUser -Name $user -Password $secure -FullName 'Runner Admin' -Description 'Auto-created'
+            Add-LocalGroupMember -Group 'Administrators' -Member $user
+          }
+          Write-Host "User: $user | Password: $pass"
+
+      - name: Aggressive Windows FPS / Power Tweaks
+        shell: pwsh
+        run: |
+          try { powercfg /S SCHEME_MIN } catch {}
+          $services=@('WSearch','SysMain','WerSvc','dmwappushservice','XblGameSave','RetailDemo','CDPUserSvc','MapsBroker','MessagingService')
+          foreach($s in $services){
+            try {
+              $svc=Get-Service -Name $s -ErrorAction Stop
+              Set-Service -Name $s -StartupType Disabled
+              Stop-Service -Name $s -Force
+            } catch { Write-Warning ("Cannot modify service {0}: {1}" -f $s, $_.Exception.Message) }
+          }
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v SystemResponsiveness /t REG_DWORD /d 0 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v Priority /t REG_DWORD /d 6 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "GPU Priority" /t REG_DWORD /d 10 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrDelay /t REG_DWORD /d 20 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrLevel /t REG_DWORD /d 0 /f
+
+      - name: Keepalive 72h
+        shell: pwsh
+        run: |
+          $it=[int]${{ env.KEEPALIVE_ITER }}
+          for($i=0;$i -lt $it;$i++){
+            Write-Host ("Keepalive {0}/{1} - {2}" -f $i,$it,(Get-Date))
+            Start-Sleep -Seconds 600
+          }
