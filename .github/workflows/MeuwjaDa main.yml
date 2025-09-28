@@ -1,0 +1,119 @@
+name: Extreme FPS Boost - My Summer Car & GTA5
+
+on:
+  workflow_dispatch:
+
+env:
+  TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+  KEEPALIVE_ITER: 432  # 432 * 10 min = 72h
+  RUNNERADMIN_USER: runneradmin
+
+jobs:
+  extreme-fps:
+    runs-on: windows-2022
+    timeout-minutes: 4320
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable Remote Desktop
+        shell: pwsh
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Force
+          netsh advfirewall firewall add rule name='RDP-Allow' dir=in action=allow protocol=TCP localport=3389
+          Restart-Service -Name TermService -Force
+
+      - name: Ensure runneradmin user
+        shell: pwsh
+        run: |
+          function GenPass { -join ((33..126) | Get-Random -Count 16 | % {[char]$_}) }
+          $user = $env:RUNNERADMIN_USER
+          $existing = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
+          if (-not $existing) {
+            $secure = ConvertTo-SecureString (GenPass) -AsPlainText -Force
+            New-LocalUser -Name $user -Password $secure -FullName 'Runner Admin' -Description 'Auto-created'
+            Add-LocalGroupMember -Group 'Administrators' -Member $user
+          }
+          $newPass = GenPass
+          $secure = ConvertTo-SecureString $newPass -AsPlainText -Force
+          Set-LocalUser -Name $user -Password $secure
+          Write-Output "RUNNERADMIN_USER=$user" >> $env:GITHUB_ENV
+          Write-Output "RUNNERADMIN_PASS=$newPass" >> $env:GITHUB_ENV
+
+      - name: Install Core Runtimes (.NET / VC++)
+        shell: pwsh
+        run: |
+          $t = $env:TEMP
+          # .NET 4.8
+          $dn = Join-Path $t 'ndp48.exe'
+          Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2088631' -OutFile $dn -UseBasicParsing
+          Start-Process -FilePath $dn -ArgumentList '/q','/norestart' -Wait -NoNewWindow
+          # VC++ redistributables
+          $vcx86 = Join-Path $t 'vc_redist.x86.exe'
+          $vcx64 = Join-Path $t 'vc_redist.x64.exe'
+          Invoke-WebRequest 'https://aka.ms/vs/17/release/vc_redist.x86.exe' -OutFile $vcx86 -UseBasicParsing
+          Invoke-WebRequest 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $vcx64 -UseBasicParsing
+          Start-Process -FilePath $vcx86 -ArgumentList '/install','/quiet','/norestart' -Wait -NoNewWindow
+          Start-Process -FilePath $vcx64 -ArgumentList '/install','/quiet','/norestart' -Wait -NoNewWindow
+
+      - name: Aggressive Windows Tweaks
+        shell: pwsh
+        run: |
+          # Power plan
+          try { powercfg /S SCHEME_MIN } catch {}
+          # Disable non-critical services safely
+          $services=@('WSearch','SysMain','WerSvc','dmwappushservice','XblGameSave','RetailDemo','CDPUserSvc','MapsBroker','MessagingService')
+          foreach($s in $services){
+            try {
+              $svc=Get-Service -Name $s -ErrorAction Stop
+              Set-Service -Name $s -StartupType Disabled
+              Stop-Service -Name $s -Force
+            } catch { Write-Warning "Cannot modify service $s: $_" }
+          }
+          # Registry FPS tweaks
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v SystemResponsiveness /t REG_DWORD /d 0 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v Priority /t REG_DWORD /d 6 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "GPU Priority" /t REG_DWORD /d 10 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrDelay /t REG_DWORD /d 20 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrLevel /t REG_DWORD /d 0 /f
+
+      - name: SwiftShader Software GPU
+        shell: pwsh
+        run: |
+          $t = Join-Path $env:TEMP 'swiftshader'
+          New-Item -Path $t -ItemType Directory -Force | Out-Null
+          $zip = Join-Path $env:TEMP 'SwiftShader-Release.zip'
+          Invoke-WebRequest 'https://github.com/google/swiftshader/releases/latest/download/SwiftShader-Release.zip' -OutFile $zip -UseBasicParsing
+          Expand-Archive -Path $zip -DestinationPath $t -Force
+          $fallback='C:\Games\GPU_SoftwareFallback'
+          New-Item -Path $fallback -ItemType Directory -Force | Out-Null
+          Get-ChildItem -Path $t -Recurse | ForEach-Object { Copy-Item $_.FullName -Destination $fallback -Force }
+
+      - name: Launch My Summer Car & GTA5 Boost
+        shell: pwsh
+        run: |
+          $msc="C:\Program Files (x86)\Steam\steamapps\common\My Summer Car\MySummerCar.exe"
+          $gta="C:\Program Files\Rockstar Games\GTA V\GTA5.exe"
+          $fallback="C:\Games\GPU_SoftwareFallback"
+          if(Test-Path $fallback){
+            Get-ChildItem $fallback -Recurse | ForEach-Object {
+              Copy-Item $_.FullName -Destination (Split-Path $msc) -Force
+              Copy-Item $_.FullName -Destination (Split-Path $gta) -Force
+            }
+          }
+          $p1=Start-Process $msc -PassThru
+          Start-Sleep -Seconds 2
+          try { $p1.PriorityClass="RealTime" } catch {}
+          $p2=Start-Process $gta -PassThru
+          Start-Sleep -Seconds 2
+          try { $p2.PriorityClass="RealTime" } catch {}
+
+      - name: Keepalive 72h
+        shell: pwsh
+        run: |
+          $it=[int]${{ env.KEEPALIVE_ITER }}
+          for($i=0;$i -lt $it;$i++){
+            Write-Host ("Keepalive {0}/{1} - {2}" -f $i,$it,(Get-Date))
+            Start-Sleep -Seconds 600
