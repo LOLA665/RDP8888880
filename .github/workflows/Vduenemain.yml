@@ -1,0 +1,108 @@
+name: RDP Gaming MAX BOOST
+
+on:
+  workflow_dispatch:
+
+env:
+  TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+  KEEPALIVE_ITER: 432
+  RUNNERADMIN_USER: runneradmin
+
+jobs:
+  rdp-max-fps:
+    runs-on: windows-2022
+    timeout-minutes: 4320
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Activate RDP
+        shell: pwsh
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389
+          Restart-Service -Name TermService -Force
+
+      - name: Create/Reset runneradmin
+        shell: pwsh
+        run: |
+          function GenPass { -join ((33..126) | Get-Random -Count 16 | ForEach-Object {[char]$_}) }
+          $user="${{ env.RUNNERADMIN_USER }}"
+          $existing = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
+          $newPass=GenPass
+          $secure = ConvertTo-SecureString $newPass -AsPlainText -Force
+          if ($existing) { Set-LocalUser -Name $user -Password $secure } 
+          else { New-LocalUser -Name $user -Password $secure -FullName "Runner Admin" -Description "Auto-created"; Add-LocalGroupMember -Group "Administrators" -Member $user }
+          Write-Output "RUNNERADMIN_USER=$user" >> $env:GITHUB_ENV
+          Write-Output "RUNNERADMIN_PASS=$newPass" >> $env:GITHUB_ENV
+          Write-Host "User $user ready with password."
+
+      - name: Install Core Runtimes
+        shell: pwsh
+        run: |
+          $t=$env:TEMP
+          # DirectX 9/10/11 redistributable
+          $dx=Join-Path $t 'directx_redist_Jun2010.exe'
+          Invoke-WebRequest 'https://download.microsoft.com/download/1/1/8/1187A7B7-6B28-42B2-A39B-33A3E0A1F7E0/directx_Jun2010_redist.exe' -OutFile $dx -UseBasicParsing
+          Start-Process $dx -ArgumentList '/Q' -Wait
+          # .NET Framework 4.8
+          $dn=Join-Path $t 'ndp48.exe'
+          Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2088631' -OutFile $dn -UseBasicParsing
+          Start-Process $dn -ArgumentList '/q','/norestart' -Wait
+          # VC++ 2019 Redistributables
+          $vcx86=Join-Path $t 'vc_redist.x86.exe'
+          $vcx64=Join-Path $t 'vc_redist.x64.exe'
+          Invoke-WebRequest 'https://aka.ms/vs/17/release/vc_redist.x86.exe' -OutFile $vcx86
+          Invoke-WebRequest 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $vcx64
+          Start-Process $vcx86 -ArgumentList '/install','/quiet','/norestart' -Wait
+          Start-Process $vcx64 -ArgumentList '/install','/quiet','/norestart' -Wait
+
+      - name: Aggressive FPS & Windows Tweaks
+        shell: pwsh
+        run: |
+          try { powercfg /S SCHEME_MIN } catch {}
+          $services=@('WSearch','SysMain','WerSvc','dmwappushservice','XblGameSave','RetailDemo','CDPUserSvc','MapsBroker','MessagingService')
+          foreach($s in $services){try{Set-Service -Name $s -StartupType Disabled; Stop-Service -Name $s -Force} catch{}}
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v SystemResponsiveness /t REG_DWORD /d 0 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v Priority /t REG_DWORD /d 6 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "GPU Priority" /t REG_DWORD /d 10 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrDelay /t REG_DWORD /d 20 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrLevel /t REG_DWORD /d 0 /f
+
+      - name: SwiftShader Software GPU Fallback
+        shell: pwsh
+        run: |
+          $t=Join-Path $env:TEMP "swiftshader"
+          New-Item -Path $t -ItemType Directory -Force
+          $zip=Join-Path $env:TEMP "SwiftShader-Release.zip"
+          Invoke-WebRequest 'https://github.com/google/swiftshader/releases/latest/download/SwiftShader-Release.zip' -OutFile $zip
+          Expand-Archive $zip -DestinationPath $t -Force
+          $fallback="C:\Games\GPU_SoftwareFallback"
+          New-Item -Path $fallback -ItemType Directory -Force
+          Get-ChildItem $t -Filter "*.dll" -Recurse | ForEach-Object { Copy-Item $_.FullName $fallback -Force }
+
+      - name: Install Tailscale & Show IP
+        shell: pwsh
+        run: |
+          if ($env:TAILSCALE_AUTH_KEY) {
+            $msi=Join-Path $env:TEMP "tailscale.msi"
+            Invoke-WebRequest 'https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi' -OutFile $msi
+            Start-Process msiexec.exe -ArgumentList "/i",$msi,"/quiet","/norestart" -Wait
+            & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname="gh-gaming-$($env:GITHUB_RUN_ID)"
+          }
+          $tsIp=""
+          try { $tsIp = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4; $tsIp = $tsIp.Trim() } catch {}
+          Write-Host "=== ACCESS INFO ==="
+          Write-Host "User: $($env:RUNNERADMIN_USER)"
+          Write-Host "Password: $($env:RUNNERADMIN_PASS)"
+          Write-Host "Tailscale IP: $tsIp"
+
+      - name: Keepalive 72h
+        shell: pwsh
+        run: |
+          $it=${env:KEEPALIVE_ITER}
+          for ($i=0; $i -lt $it; $i++) {
+            Write-Host ("Keepalive {0}/{1} - {2}" -f $i, $it, (Get-Date))
+            Start-Sleep -Seconds 600
