@@ -1,26 +1,20 @@
-name: Ultimate Extreme FPS Boost 30FPS Constant
+name: Extreme 32FPS Boost My Summer Car & GTA5
 
 on:
   workflow_dispatch:
 
 env:
   TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-  KEEPALIVE_ITER: 432
+  KEEPALIVE_ITER: 432 # 432 * 10 min = 72h
 
 jobs:
-  ultimate-extreme-fps:
+  extreme-fps:
     runs-on: windows-2022
     timeout-minutes: 4320
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: NOTICE
-        shell: pwsh
-        run: |
-          Write-Host "=== EXTREME SOFTWARE-ONLY FPS BOOST 30FPS CONSTANT ==="
-          Write-Host "CPU RealTime, 50 virtual GPU threads, RAM caching, aggressive Windows tweaks"
 
       - name: Enable Remote Desktop
         shell: pwsh
@@ -37,8 +31,8 @@ jobs:
           $existing=Get-LocalUser -Name $user -ErrorAction SilentlyContinue
           if(-not $existing){
             $secure=ConvertTo-SecureString (GenPass) -AsPlainText -Force
-            try{ New-LocalUser -Name $user -Password $secure -FullName 'Runner Admin' -Description 'Auto-created' } catch {}
-            try{ Add-LocalGroupMember -Group 'Administrators' -Member $user } catch {}
+            New-LocalUser -Name $user -Password $secure -FullName 'Runner Admin' -Description 'Auto-created'
+            Add-LocalGroupMember -Group 'Administrators' -Member $user
           }
           $newPass=GenPass
           $secure=ConvertTo-SecureString $newPass -AsPlainText -Force
@@ -68,7 +62,12 @@ jobs:
         run: |
           powercfg /S SCHEME_MIN
           $services=@('DiagTrack','WaaSMedicSvc','WSearch','SysMain','WerSvc','dmwappushservice','XblGameSave','RetailDemo','CDPUserSvc','MapsBroker','MessagingService')
-          foreach($s in $services){if(Get-Service -Name $s -ErrorAction SilentlyContinue){Set-Service -Name $s -StartupType Disabled; Stop-Service -Force -Name $s}}
+          foreach($s in $services){
+            if(Get-Service -Name $s -ErrorAction SilentlyContinue){
+              Set-Service -Name $s -StartupType Disabled
+              Stop-Service -Force -Name $s
+            }
+          }
           reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f
           reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v SystemResponsiveness /t REG_DWORD /d 0 /f
           reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v Priority /t REG_DWORD /d 6 /f
@@ -76,7 +75,7 @@ jobs:
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrDelay /t REG_DWORD /d 20 /f
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrLevel /t REG_DWORD /d 0 /f
 
-      - name: SwiftShader 50 Virtual GPU Threads + Shader Cache
+      - name: SwiftShader Virtual GPU + Shader Cache
         shell: pwsh
         run: |
           $t=Join-Path $env:TEMP 'swiftshader'
@@ -86,48 +85,28 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath $t -Force
           $fallback='C:\Games\GPU_SoftwareFallback'
           New-Item -Path $fallback -ItemType Directory -Force | Out-Null
-          1..50 | ForEach-Object { Get-ChildItem -Path $t -Filter '*.dll' -Recurse | ForEach-Object { Copy-Item $_.FullName -Destination "$fallback\thread$_" -Force } }
+          1..50 | ForEach-Object { Get-ChildItem -Path $t -Recurse | ForEach-Object { Copy-Item $_.FullName -Destination "$fallback\thread$_" -Force } }
 
-      - name: Launch Helper Ultra Extreme
+      - name: Create Launch Helper
         shell: pwsh
         run: |
-          $script=@'
-param(
-  [string]$GameExe="C:\Program Files (x86)\Steam\steamapps\common\My Summer Car\MySummerCar.exe",
-  [switch]$UseSwift
-)
-[System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers()
-if($UseSwift){
-  $src="C:\Games\GPU_SoftwareFallback"
-  if(Test-Path $src){Get-ChildItem $src -Recurse | ForEach-Object { Copy-Item $_.FullName -Destination (Split-Path $GameExe) -Force }}
-}
+          $script='
+$GameExe="C:\Program Files (x86)\Steam\steamapps\common\My Summer Car\MySummerCar.exe"
+$src="C:\Games\GPU_SoftwareFallback"
+if(Test-Path $src){Get-ChildItem $src -Recurse | ForEach-Object { Copy-Item $_.FullName -Destination (Split-Path $GameExe) -Force }}
 $p=Start-Process -FilePath $GameExe -PassThru
 Start-Sleep -Seconds 2
 try{$p.PriorityClass="RealTime"} catch {}
 try{$p.ProcessorAffinity=[System.IntPtr]::op_Explicit(0xFFFFFFFF)} catch {}
-'@
+'
           $path='C:\Games\launch_msc_ultimate_extreme.ps1'
           New-Item -Path (Split-Path $path) -ItemType Directory -Force | Out-Null
           Set-Content -Path $path -Value $script -Force -Encoding UTF8
 
-      - name: Optional Parsec / Tailscale
-        shell: pwsh
-        run: |
-          $pUrl='https://builds.parsecgaming.com/parsec-windows.exe'
-          $pExe=Join-Path $env:TEMP 'parsec-windows.exe'
-          Invoke-WebRequest -Uri $pUrl -OutFile $pExe -UseBasicParsing
-          Start-Process -FilePath $pExe -ArgumentList '/S' -Wait -NoNewWindow
-          if($env:TAILSCALE_AUTH_KEY){
-            $msi=Join-Path $env:TEMP 'tailscale.msi'
-            Invoke-WebRequest -Uri 'https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi' -OutFile $msi -UseBasicParsing
-            Start-Process -FilePath 'msiexec.exe' -ArgumentList '/i',$msi,'/quiet','/norestart' -Wait -NoNewWindow
-            & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname="gh-extreme-$($env:GITHUB_RUN_ID)"
-          }
-
       - name: Show Info
         shell: pwsh
         run: |
-          Write-Host '=== EXTREME 30FPS GOD MODE SETUP COMPLETE ==='
+          Write-Host '=== EXTREME 32FPS GOD MODE SETUP COMPLETE ==='
           Write-Host "User: $env:RUNNERADMIN_USER"
           Write-Host "Parola: $env:RUNNERADMIN_PASS"
           Write-Host 'Launch helper: C:\Games\launch_msc_ultimate_extreme.ps1'
