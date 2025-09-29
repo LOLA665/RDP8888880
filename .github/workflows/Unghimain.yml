@@ -1,0 +1,215 @@
+name: RDP Gaming Server — Fixed (continue-on-error safe)
+
+on:
+  workflow_dispatch:
+
+env:
+  TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+  RUNNERADMIN_PASS: ${{ secrets.RUNNERADMIN_PASS }}  # optional: dacă e gol, se generează una sigură
+  KEEPALIVE_ITER: 432
+  RUNNERADMIN_USER: runneradmin
+
+jobs:
+  rdp-gaming:
+    runs-on: windows-2022
+    timeout-minutes: 4320
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure runneradmin exists & export credentials
+        shell: pwsh
+        run: |
+          # generează parolă validă dacă nu există sau nu respectă politica
+          $provided = $env:RUNNERADMIN_PASS
+          $isValid = $false
+          if (-not [string]::IsNullOrWhiteSpace($provided)) {
+            if ($provided.Length -ge 8 -and $provided -match '[A-Z]' -and $provided -match '[a-z]' -and $provided -match '\d' -and $provided -match '[^a-zA-Z0-9]') { $isValid = $true }
+          }
+          if ($isValid) { $pass = $provided } else { $pass = "Runner@" + (Get-Random -Minimum 10000 -Maximum 99999) }
+
+          $user = $env:RUNNERADMIN_USER
+
+          if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) {
+            try { net user $user $pass } catch { Write-Warning "Could not reset password for $user: $($_.Exception.Message)" }
+            Write-Host "Existing user $user - password reset (or attempted)."
+          } else {
+            try {
+              net user $user $pass /add
+              net localgroup administrators $user /add
+              Write-Host "Created user $user and added to Administrators."
+            } catch { Write-Warning "Could not create $user: $($_.Exception.Message)" }
+          }
+
+          # export pentru pașii următori
+          Write-Output ("RUNNERADMIN_USER={0}" -f $user) >> $env:GITHUB_ENV
+          Write-Output ("RUNNERADMIN_PASS={0}" -f $pass) >> $env:GITHUB_ENV
+          Write-Host "RUNNERADMIN_USER and RUNNERADMIN_PASS exported."
+
+      - name: Enable Remote Desktop & Firewall (safe)
+        shell: pwsh
+        run: |
+          try { Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Force } catch { Write-Warning "Enable RDP failed: $($_.Exception.Message)" }
+          try { Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue } catch {}
+          Write-Host "RDP/firewall attempted."
+
+      - name: Install dependencies (DirectX / .NET / VC++) (may fail but continue)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $t = $env:TEMP
+
+          # DirectX (valid Microsoft URL)
+          $dx = Join-Path $t 'directx_Jun2010_redist.exe'
+          try {
+            Invoke-WebRequest 'https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-4AE8-8280-9E7F4AA0AAB1/directx_Jun2010_redist.exe' -OutFile $dx -UseBasicParsing -ErrorAction Stop
+            Start-Process -FilePath $dx -ArgumentList '/Q' -Wait -NoNewWindow
+            Write-Host "DirectX attempted."
+          } catch { Write-Warning "DirectX step failed (continuing): $($_.Exception.Message)" }
+
+          # .NET 4.8
+          $dn = Join-Path $t 'ndp48.exe'
+          try {
+            Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2088631' -OutFile $dn -UseBasicParsing -ErrorAction Stop
+            Start-Process -FilePath $dn -ArgumentList '/q','/norestart' -Wait -NoNewWindow
+            Write-Host ".NET attempted."
+          } catch { Write-Warning ".NET step failed (continuing): $($_.Exception.Message)" }
+
+          # VC++ redistributables
+          $vcx86 = Join-Path $t 'vc_redist.x86.exe'
+          $vcx64 = Join-Path $t 'vc_redist.x64.exe'
+          try {
+            Invoke-WebRequest 'https://aka.ms/vs/17/release/vc_redist.x86.exe' -OutFile $vcx86 -UseBasicParsing -ErrorAction Stop
+            Invoke-WebRequest 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $vcx64 -UseBasicParsing -ErrorAction Stop
+            Start-Process -FilePath $vcx86 -ArgumentList '/install','/quiet','/norestart' -Wait -NoNewWindow
+            Start-Process -FilePath $vcx64 -ArgumentList '/install','/quiet','/norestart' -Wait -NoNewWindow
+            Write-Host "VC++ attempted."
+          } catch { Write-Warning "VC++ step failed (continuing): $($_.Exception.Message)" }
+
+      - name: Aggressive Windows FPS / Performance tweaks (safe)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          try { powercfg /S SCHEME_MIN } catch { Write-Warning "powercfg failed: $($_.Exception.Message)" }
+
+          $svcList = @('WSearch','SysMain','WerSvc','dmwappushservice','XblGameSave','RetailDemo','CDPUserSvc','MapsBroker','MessagingService')
+          foreach ($s in $svcList) {
+            try {
+              if (Get-Service -Name $s -ErrorAction Stop) {
+                Set-Service -Name $s -StartupType Disabled -ErrorAction Stop
+                Stop-Service -Name $s -Force -ErrorAction Stop
+                Write-Host "Stopped and disabled: $s"
+              }
+            } catch { Write-Warning ("Cannot modify {0}: {1}" -f $s, $_.Exception.Message) }
+          }
+
+          # registry tweaks (fail quietly)
+          try { reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f } catch {}
+          try { reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v SystemResponsiveness /t REG_DWORD /d 0 /f } catch {}
+          try { reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v Priority /t REG_DWORD /d 6 /f } catch {}
+          try { reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v 'GPU Priority' /t REG_DWORD /d 10 /f } catch {}
+          try { reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrDelay /t REG_DWORD /d 20 /f } catch {}
+          try { reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrLevel /t REG_DWORD /d 0 /f } catch {}
+
+      - name: Install SwiftShader (software GPU fallback) - continue on error
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $t = Join-Path $env:TEMP "swiftshader"
+          New-Item -Path $t -ItemType Directory -Force | Out-Null
+          $zip = Join-Path $env:TEMP "SwiftShader-Release.zip"
+          try {
+            Invoke-WebRequest 'https://github.com/google/swiftshader/releases/latest/download/SwiftShader-Release.zip' -OutFile $zip -UseBasicParsing -ErrorAction Stop
+            Expand-Archive -Path $zip -DestinationPath $t -Force
+            $fallback = "C:\Games\GPU_SoftwareFallback"
+            New-Item -Path $fallback -ItemType Directory -Force | Out-Null
+            Get-ChildItem -Path $t -Filter "*.dll" -Recurse | ForEach-Object { Copy-Item -Path $_.FullName -Destination $fallback -Force -ErrorAction SilentlyContinue }
+            Write-Host "SwiftShader copied to $fallback"
+          } catch { Write-Warning "SwiftShader install failed (continuing): $($_.Exception.Message)" }
+
+      - name: Create launch helper script (avoids inline GC in YAML)
+        shell: pwsh
+        run: |
+          $script = @'
+# launch_games_boost.ps1
+# Aggressive launcher: copies SwiftShader DLLs (if present) and launches games with high priority.
+[System.GC]::Collect()
+[System.GC]::WaitForPendingFinalizers()
+
+$msc = "C:\Program Files (x86)\Steam\steamapps\common\My Summer Car\MySummerCar.exe"
+$gta = "C:\Program Files\Rockstar Games\GTA V\GTA5.exe"
+$fallback = "C:\Games\GPU_SoftwareFallback"
+
+if (Test-Path $fallback) {
+  Get-ChildItem -Path $fallback -Recurse | ForEach-Object {
+    try { Copy-Item -Path $_.FullName -Destination (Split-Path $msc) -Force -ErrorAction SilentlyContinue } catch {}
+    try { Copy-Item -Path $_.FullName -Destination (Split-Path $gta) -Force -ErrorAction SilentlyContinue } catch {}
+  }
+}
+
+if (Test-Path $msc) {
+  $p = Start-Process -FilePath $msc -PassThru -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 3
+  try { $p.PriorityClass = "High" } catch {}
+  try { $p.ProcessorAffinity = [System.IntPtr]::op_Explicit(0xFFFFFFFF) } catch {}
+}
+
+if (Test-Path $gta) {
+  $p2 = Start-Process -FilePath $gta -PassThru -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 3
+  try { $p2.PriorityClass = "High" } catch {}
+  try { $p2.ProcessorAffinity = [System.IntPtr]::op_Explicit(0xFFFFFFFF) } catch {}
+}
+'@
+
+          $path = "C:\Games\launch_games_boost.ps1"
+          New-Item -Path (Split-Path $path) -ItemType Directory -Force | Out-Null
+          Set-Content -Path $path -Value $script -Encoding UTF8 -Force
+          Write-Host "Wrote launch helper to $path"
+
+      - name: Install & Start Tailscale (if key provided) - continue on error
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
+            try {
+              $msi = Join-Path $env:TEMP "tailscale.msi"
+              Invoke-WebRequest 'https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi' -OutFile $msi -UseBasicParsing -ErrorAction Stop
+              Start-Process msiexec.exe -ArgumentList '/i',$msi,'/quiet','/norestart' -Wait -NoNewWindow
+              & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname "gh-gaming-$($env:GITHUB_RUN_ID)" --accept-routes
+              Write-Host "Tailscale start attempted."
+            } catch { Write-Warning "Tailscale failed (continuing): $($_.Exception.Message)" }
+          } else {
+            Write-Warning "No TAILSCALE_AUTH_KEY — skipping Tailscale."
+          }
+
+      - name: Show credentials and reachable IP
+        shell: pwsh
+        run: |
+          $user = $env:RUNNERADMIN_USER
+          $pass = $env:RUNNERADMIN_PASS
+          Write-Host "=== ACCESS INFO ==="
+          Write-Host ("User: {0}" -f $user)
+          Write-Host ("Password: {0}" -f $pass)
+
+          # try Tailscale IP first
+          $tsIp = ""
+          if (Test-Path "$env:ProgramFiles\Tailscale\tailscale.exe") {
+            try { $tsIp = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4; $tsIp = $tsIp.Trim() } catch {}
+          }
+          if ([string]::IsNullOrWhiteSpace($tsIp)) {
+            try { $tsIp = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notlike "Loopback*"} | Select-Object -First 1).IPAddress } catch {}
+          }
+          Write-Host ("IP: {0}" -f ($tsIp -ne $null ? $tsIp : "(unavailable)"))
+          Write-Host "Launch helper: C:\Games\launch_games_boost.ps1"
+          Write-Host "SwiftShader fallback: C:\Games\GPU_SoftwareFallback"
+
+      - name: Keepalive loop (72h)
+        shell: pwsh
+        run: |
+          $it = [int]${{ env.KEEPALIVE_ITER }}
+          for ($i = 0; $i -lt $it; $i++) {
+            Write-Host ("Keepalive {0}/{1} - {2}" -f $i, $it, (Get-Date))
+            Start-Sleep -Seconds 600
+          }
