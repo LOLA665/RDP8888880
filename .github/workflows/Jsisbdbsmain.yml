@@ -1,0 +1,50 @@
+      - name: Gaming FPS Boost - System tweaks
+        shell: pwsh
+        run: |
+          # High performance
+          powercfg -setactive SCHEME_MIN
+
+          # Kill bloat services
+          $svcList = @('WSearch','SysMain','WerSvc','dmwappushservice','DiagTrack','XblGameSave','RetailDemo','CDPUserSvc','MapsBroker','MessagingService','WbioSrvc')
+          foreach ($s in $svcList) {
+            try { Stop-Service -Name $s -Force -ErrorAction SilentlyContinue; Set-Service -Name $s -StartupType Disabled } catch {}
+          }
+
+          # Registry tweaks
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" /v SystemResponsiveness /t REG_DWORD /d 0 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v Priority /t REG_DWORD /d 6 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games" /v "GPU Priority" /t REG_DWORD /d 10 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrDelay /t REG_DWORD /d 20 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrLevel /t REG_DWORD /d 0 /f
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f
+
+      - name: Install DXVK (DirectX → Vulkan)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $t = Join-Path $env:TEMP "dxvk"
+          New-Item -Path $t -ItemType Directory -Force | Out-Null
+          $zip = Join-Path $t "dxvk.zip"
+          try {
+            Invoke-WebRequest 'https://github.com/doitsujin/dxvk/releases/latest/download/dxvk-2.4.tar.gz' -OutFile $zip -ErrorAction Stop
+            tar -xzf $zip -C $t
+            $msc = "C:\Program Files (x86)\Steam\steamapps\common\My Summer Car"
+            Copy-Item -Path (Get-ChildItem $t -Recurse -Filter "d3d11.dll" | Select-Object -First 1).FullName -Destination $msc -Force
+            Copy-Item -Path (Get-ChildItem $t -Recurse -Filter "dxgi.dll" | Select-Object -First 1).FullName -Destination $msc -Force
+            Write-Host "DXVK DLLs copied into My Summer Car folder"
+          } catch { Write-Warning "DXVK install failed" }
+
+      - name: Launch My Summer Car with Boost
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $msc = "C:\Program Files (x86)\Steam\steamapps\common\My Summer Car\MySummerCar.exe"
+          if (Test-Path $msc) {
+            $p = Start-Process -FilePath $msc -PassThru
+            Start-Sleep -Seconds 5
+            try { $p.PriorityClass = "High" } catch {}
+            try { $p.ProcessorAffinity = [System.IntPtr]::op_Explicit(0xFFFFFFFF) } catch {}
+            Write-Host "My Summer Car started with High priority + all cores"
+          } else {
+            Write-Warning "Game not found at $msc"
+          }
